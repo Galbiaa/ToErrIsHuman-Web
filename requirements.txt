@@ -1,0 +1,9 @@
+streamlit
+torch
+torchvision
+xgboost
+scikit-learn
+pandas
+numpy
+joblib
+Pillow
