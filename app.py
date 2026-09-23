@@ -8,14 +8,12 @@ import numpy as np
 from PIL import Image
 from torchvision import transforms
 
-# Configurazione pagina Streamlit
 st.set_page_config(
     page_title="ToErrIsHuman AI",
     page_icon="🧠",
     layout="wide"
 )
 
-# Includi la cartella src nel percorso Python
 SRC_DIR = Path(__file__).resolve().parent / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
@@ -24,7 +22,6 @@ from models import DiagnosticNet
 
 device = torch.device("cpu")
 
-# Trasformazioni per l'inferenza della ResNet-18 (Stadio 1)
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
 
@@ -38,12 +35,13 @@ transform = transforms.Compose([
 def logits_to_prob(logits: np.ndarray) -> np.ndarray:
     return 1.0 / (1.0 + np.exp(-logits))
 
-# Caricamento e caching dei 5 fold in RAM per massima velocità
+# Caricamento e caching dei 5 fold con estrazione di threshold_youden dai dati reali
 @st.cache_resource
 def load_ensemble_models():
     diagnostic_models = []
     preprocessors = []
     xgb_models = []
+    youden_thresholds = []
 
     for fold in range(1, 6):
         diag_path = Path(f"models/diagnostic/diagnostic_fold_{fold}.pt")
@@ -64,15 +62,19 @@ def load_ensemble_models():
         model.eval()
         diagnostic_models.append(model)
 
-        # 2. Carica Preprocessor & XGBoost (Modello D)
+        # 2. Carica Preprocessor, XGBoost e la vera Soglia di Youden dai file salvati
         pre = joblib.load(pre_path)
         payload = joblib.load(d_path)
         clf = payload["model"]
+        
+        # Lettura esatta della soglia di Youden derivata dai dati di train/val
+        thr_youden = float(payload["threshold_youden"])
 
         preprocessors.append(pre)
         xgb_models.append(clf)
+        youden_thresholds.append(thr_youden)
 
-    return diagnostic_models, preprocessors, xgb_models
+    return diagnostic_models, preprocessors, xgb_models, youden_thresholds
 
 def predict_single_fold(model, axial_img, coronal_img, sagittal_img):
     t_ax = transform(axial_img)
@@ -84,15 +86,13 @@ def predict_single_fold(model, axial_img, coronal_img, sagittal_img):
         prob = float(logits_to_prob(logits.numpy())[0])
     return prob
 
-# Interfaccia grafica Streamlit
 st.title("🧠 ToErrIsHuman — Predictor di Errore Diagnostico Umano")
 st.markdown("""
 Questa applicazione web stima la probabilità di **errore diagnostico umano** combinando l'analisi radiologica 3D delle MRI con il contesto clinico del medico valutatore (Rater).
 """)
 
-# Carica i modelli in RAM (mostra uno spinner solo al primo avvio)
 with st.spinner("Caricamento modelli in memoria..."):
-    diagnostic_models, preprocessors, xgb_models = load_ensemble_models()
+    diagnostic_models, preprocessors, xgb_models, youden_thresholds = load_ensemble_models()
 
 st.divider()
 
@@ -159,35 +159,35 @@ if st.button("🔍 Calcola Rischio Errore", type="primary", use_container_width=
                 }])
 
                 # 3. Probabilità Errore Diagnostico con XGBoost (Stadio 2)
-                X_t = pre.transform(X_df)  # Passa il DataFrame per preservare le intestazioni di colonna
+                X_t = pre.transform(X_df)
                 p_err = float(clf.predict_proba(X_t)[:, 1][0])
                 d_probs.append(p_err)
 
             mean_p_error = float(np.mean(d_probs))
             mean_p_ai = float(np.mean(ai_probs))
-
-            # METODO A: Soglia Operativa Calibrata basata sulla prevalenza reale dell'errore (~19%)
-            OPERATIONAL_THRESHOLD = 0.20
+            
+            # Soglia di Youden derivata rigorosamente dai dati dell'Ensemble
+            mean_youden_threshold = float(np.mean(youden_thresholds))
 
         st.subheader("📊 Risultati dell'Inferenza")
         
         m_col1, m_col2, m_col3 = st.columns(3)
         m_col1.metric(label="Stima Rischio Errore Umano", value=f"{mean_p_error:.1%}")
-        m_col2.metric(label="Soglia Operativa di Sicurezza", value=f"{OPERATIONAL_THRESHOLD:.1%}")
+        m_col2.metric(label="Soglia Operativa Youden (Reale)", value=f"{mean_youden_threshold:.1%}")
         m_col3.metric(label="Probabilità Patologia (AI Stadio 1)", value=f"{mean_p_ai:.1%}")
 
         st.divider()
 
-        # Decisione Operativa di Allarme
-        if mean_p_error >= OPERATIONAL_THRESHOLD:
+        # Decisione basata rigorosamente sull'Indice J di Youden derivato dai dati
+        if mean_p_error >= mean_youden_threshold:
             st.error(
                 f"🚨 **ALTO RISCHIO ERRORE DIAGNOSTICO**\n\n"
-                f"La probabilità stimata di errore umano (**{mean_p_error:.1%}**) supera la soglia operativa di sicurezza (**{OPERATIONAL_THRESHOLD:.1%}**).\n\n"
+                f"La probabilità stimata di errore umano (**{mean_p_error:.1%}**) supera o eguaglia la soglia ottima di Youden (**{mean_youden_threshold:.1%}**).\n\n"
                 f"👉 *Raccomandazione:* Si consiglia un secondo parere radiologico o una revisione approfondita dell'esame."
             )
         else:
             st.success(
                 f"✅ **BASSO RISCHIO ERRORE**\n\n"
-                f"La probabilità stimata di errore umano (**{mean_p_error:.1%}**) è inferiore alla soglia operativa di sicurezza (**{OPERATIONAL_THRESHOLD:.1%}**).\n\n"
-                f"👉 *Raccomandazione:* La diagnosi del medico risulta coerente con il profilo clinico ed i rilievi delle immagini MRI."
+                f"La probabilità stimata di errore umano (**{mean_p_error:.1%}**) è inferiore alla soglia ottima di Youden (**{mean_youden_threshold:.1%}**).\n\n"
+                f"👉 *Raccomandazione:* La diagnosi del medico risulta coerente con il contesto ed i rilievi delle immagini MRI."
             )
