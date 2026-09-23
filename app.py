@@ -24,7 +24,7 @@ from models import DiagnosticNet
 
 device = torch.device("cpu")
 
-# Trasformazioni per l'inferenza della ResNet-18 (Stage 1)
+# Trasformazioni per l'inferenza della ResNet-18 (Stadio 1)
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
 
@@ -44,7 +44,6 @@ def load_ensemble_models():
     diagnostic_models = []
     preprocessors = []
     xgb_models = []
-    thresholds = []
 
     for fold in range(1, 6):
         diag_path = Path(f"models/diagnostic/diagnostic_fold_{fold}.pt")
@@ -65,19 +64,15 @@ def load_ensemble_models():
         model.eval()
         diagnostic_models.append(model)
 
-        # 2. Carica Preprocessor, XGBoost e la soglia di Youden esatta
+        # 2. Carica Preprocessor & XGBoost (Modello D)
         pre = joblib.load(pre_path)
         payload = joblib.load(d_path)
         clf = payload["model"]
-        
-        # Lettura esatta della chiave 'threshold_youden' salvata nei .joblib
-        thr = float(payload.get("threshold_youden", 0.20))
 
         preprocessors.append(pre)
         xgb_models.append(clf)
-        thresholds.append(thr)
 
-    return diagnostic_models, preprocessors, xgb_models, thresholds
+    return diagnostic_models, preprocessors, xgb_models
 
 def predict_single_fold(model, axial_img, coronal_img, sagittal_img):
     t_ax = transform(axial_img)
@@ -95,9 +90,9 @@ st.markdown("""
 Questa applicazione web stima la probabilità di **errore diagnostico umano** combinando l'analisi radiologica 3D delle MRI con il contesto clinico del medico valutatore (Rater).
 """)
 
-# Carica i modelli in RAM
+# Carica i modelli in RAM (mostra uno spinner solo al primo avvio)
 with st.spinner("Caricamento modelli in memoria..."):
-    diagnostic_models, preprocessors, xgb_models, thresholds = load_ensemble_models()
+    diagnostic_models, preprocessors, xgb_models = load_ensemble_models()
 
 st.divider()
 
@@ -153,7 +148,7 @@ if st.button("🔍 Calcola Rischio Errore", type="primary", use_container_width=
                     "rating-confidence": float(confidence),
                     "case-difficulty": float(difficulty),
                     "rater-expertise": float(expertise),
-                    "rater-accuracy": 0.80,  # Fallback per medici non presenti nel dataset storico
+                    "rater-accuracy": 0.80,  # Fallback per medici non storici
                     "rater-confidence": float(confidence),
                     "rating": int(rating),
                     "ai_probability_class_1": float(p_ai),
@@ -164,33 +159,35 @@ if st.button("🔍 Calcola Rischio Errore", type="primary", use_container_width=
                 }])
 
                 # 3. Probabilità Errore Diagnostico con XGBoost (Stadio 2)
-                X_t = pre.transform(X_df)  # Passa il DataFrame per preservare i nomi delle colonne
+                X_t = pre.transform(X_df)  # Passa il DataFrame per preservare le intestazioni di colonna
                 p_err = float(clf.predict_proba(X_t)[:, 1][0])
                 d_probs.append(p_err)
 
             mean_p_error = float(np.mean(d_probs))
             mean_p_ai = float(np.mean(ai_probs))
-            mean_threshold = float(np.mean(thresholds))
+
+            # METODO A: Soglia Operativa Calibrata basata sulla prevalenza reale dell'errore (~19%)
+            OPERATIONAL_THRESHOLD = 0.20
 
         st.subheader("📊 Risultati dell'Inferenza")
         
         m_col1, m_col2, m_col3 = st.columns(3)
         m_col1.metric(label="Stima Rischio Errore Umano", value=f"{mean_p_error:.1%}")
-        m_col2.metric(label="Soglia Operativa Youden (Ensemble)", value=f"{mean_threshold:.1%}")
+        m_col2.metric(label="Soglia Operativa di Sicurezza", value=f"{OPERATIONAL_THRESHOLD:.1%}")
         m_col3.metric(label="Probabilità Patologia (AI Stadio 1)", value=f"{mean_p_ai:.1%}")
 
         st.divider()
 
-        # Logica di valutazione del rischio rispetto alla soglia Youden reale
-        if mean_p_error >= mean_threshold:
+        # Decisione Operativa di Allarme
+        if mean_p_error >= OPERATIONAL_THRESHOLD:
             st.error(
                 f"🚨 **ALTO RISCHIO ERRORE DIAGNOSTICO**\n\n"
-                f"La probabilità stimata di errore umano (**{mean_p_error:.1%}**) supera o eguaglia la soglia operativa del sistema (**{mean_threshold:.1%}**).\n\n"
-                f"👉 *Raccomandazione:* Si consiglia un secondo parere o una revisione approfondita dell'esame radiologico."
+                f"La probabilità stimata di errore umano (**{mean_p_error:.1%}**) supera la soglia operativa di sicurezza (**{OPERATIONAL_THRESHOLD:.1%}**).\n\n"
+                f"👉 *Raccomandazione:* Si consiglia un secondo parere radiologico o una revisione approfondita dell'esame."
             )
         else:
             st.success(
                 f"✅ **BASSO RISCHIO ERRORE**\n\n"
-                f"La probabilità stimata di errore umano (**{mean_p_error:.1%}**) è inferiore alla soglia operativa (**{mean_threshold:.1%}**).\n\n"
-                f"👉 *Raccomandazione:* La diagnosi del medico appare coerente con il profilo clinico ed i rilievi delle immagini MRI."
+                f"La probabilità stimata di errore umano (**{mean_p_error:.1%}**) è inferiore alla soglia operativa di sicurezza (**{OPERATIONAL_THRESHOLD:.1%}**).\n\n"
+                f"👉 *Raccomandazione:* La diagnosi del medico risulta coerente con il profilo clinico ed i rilievi delle immagini MRI."
             )
