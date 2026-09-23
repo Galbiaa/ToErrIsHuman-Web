@@ -120,14 +120,14 @@ with col2:
     difficulty = st.slider("Difficoltà Percepita del Caso (1-5)", 1, 5, 3)
     expertise = st.number_input("Esperienza del Medico (Anni di attività)", min_value=0, max_value=50, value=5)
     
-    # Controllo per l'Accuratezza Storica del Medico (default = 80%)
+    # Controllo per l'Accuratezza Storica del Medico (default = 0.80)
     rater_acc = st.slider(
         "Accuratezza Storica del Medico (Rater Accuracy)", 
         min_value=0.50, 
         max_value=1.00, 
         value=0.80, 
         step=0.01,
-        help="Percentuale storica di diagnosi corrette del medico. Valore medio di default nel dataset: 0.80 (80%)."
+        help="Percentuale storica di diagnosi corrette del medico (es. 0.80 = 80%)."
     )
 
 st.divider()
@@ -159,12 +159,12 @@ if st.button("🔍 Calcola Rischio Errore", type="primary", use_container_width=
                 p_wrong = p_ai if rating == 0 else (1.0 - p_ai)
                 margin = abs(p_ai - 0.5)
 
+                # DataFrame corretto con nomi univoci corrispondenti al payload
                 X_df = pd.DataFrame([{
                     "rating-confidence": float(confidence),
                     "case-difficulty": float(difficulty),
                     "rater-expertise": float(expertise),
-                    "rater-accuracy": float(rater_acc),  # Variabile dinamica dall'interfaccia
-                    "rater-confidence": float(confidence),
+                    "rater-accuracy": float(rater_acc),
                     "rating": int(rating),
                     "ai_probability_class_1": float(p_ai),
                     "ai_predicted_class": int(ai_pred_class),
