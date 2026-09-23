@@ -116,18 +116,18 @@ with col2:
         options=[0, 1], 
         format_func=lambda x: "0 - Esame Negativo / Sano" if x == 0 else "1 - Esame Positivo / Patologico"
     )
-    confidence = st.slider("Confidenza del Medico (1 = Minima, 5 = Massima)", 1, 5, 4)
-    difficulty = st.slider("Difficoltà Percepita del Caso (1-5)", 1, 5, 3)
-    expertise = st.number_input("Esperienza del Medico (Anni di attività)", min_value=0, max_value=50, value=5)
+    confidence = st.slider("Confidenza del Medico per il Caso (rating-confidence, 1-5)", 1, 5, 4)
+    difficulty = st.slider("Difficoltà Percepita del Caso (case-difficulty, 1-5)", 1, 5, 3)
+    expertise = st.number_input("Esperienza del Medico (rater-expertise, Anni di attività)", min_value=0, max_value=50, value=4)
     
-    # Controllo per l'Accuratezza Storica del Medico (default = 0.80)
+    # Range limitato all'intervallo reale di training (0.70 - 0.90) per evitare valori Out-Of-Distribution (OOD)
     rater_acc = st.slider(
-        "Accuratezza Storica del Medico (Rater Accuracy)", 
-        min_value=0.50, 
-        max_value=1.00, 
-        value=0.80, 
+        "Accuratezza Storica del Medico (rater-accuracy)", 
+        min_value=0.70, 
+        max_value=0.90, 
+        value=0.81, 
         step=0.01,
-        help="Percentuale storica di diagnosi corrette del medico (es. 0.80 = 80%)."
+        help="Percentuale storica di diagnosi corrette. Intervallo di addestramento del modello: 0.70 - 0.90 (Media: 0.81)."
     )
 
 st.divider()
@@ -159,12 +159,13 @@ if st.button("🔍 Calcola Rischio Errore", type="primary", use_container_width=
                 p_wrong = p_ai if rating == 0 else (1.0 - p_ai)
                 margin = abs(p_ai - 0.5)
 
-                # DataFrame corretto con nomi univoci corrispondenti al payload
+                # Definizione delle feature perfettamente corrispondente alle colonne della tabella di training
                 X_df = pd.DataFrame([{
                     "rating-confidence": float(confidence),
                     "case-difficulty": float(difficulty),
                     "rater-expertise": float(expertise),
                     "rater-accuracy": float(rater_acc),
+                    "rater-confidence": float(confidence), # Confidenza del rater nel dataset
                     "rating": int(rating),
                     "ai_probability_class_1": float(p_ai),
                     "ai_predicted_class": int(ai_pred_class),
