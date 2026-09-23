@@ -8,12 +8,14 @@ import numpy as np
 from PIL import Image
 from torchvision import transforms
 
+# Configurazione pagina Streamlit
 st.set_page_config(
     page_title="ToErrIsHuman AI",
     page_icon="🧠",
     layout="wide"
 )
 
+# Includi la cartella src nel percorso Python
 SRC_DIR = Path(__file__).resolve().parent / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
@@ -22,6 +24,7 @@ from models import DiagnosticNet
 
 device = torch.device("cpu")
 
+# Trasformazioni per l'inferenza della ResNet-18 (Stadio 1)
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
 
@@ -35,7 +38,7 @@ transform = transforms.Compose([
 def logits_to_prob(logits: np.ndarray) -> np.ndarray:
     return 1.0 / (1.0 + np.exp(-logits))
 
-# Caricamento e caching dei 5 fold con estrazione di threshold_youden dai dati reali
+# Caricamento e caching dei 5 fold in RAM con lettura di threshold_youden dai dati reali
 @st.cache_resource
 def load_ensemble_models():
     diagnostic_models = []
@@ -67,7 +70,7 @@ def load_ensemble_models():
         payload = joblib.load(d_path)
         clf = payload["model"]
         
-        # Lettura esatta della soglia di Youden derivata dai dati di train/val
+        # Lettura della chiave 'threshold_youden' salvata nei payload dei vari fold
         thr_youden = float(payload["threshold_youden"])
 
         preprocessors.append(pre)
@@ -86,11 +89,13 @@ def predict_single_fold(model, axial_img, coronal_img, sagittal_img):
         prob = float(logits_to_prob(logits.numpy())[0])
     return prob
 
+# Interfaccia grafica Streamlit
 st.title("🧠 ToErrIsHuman — Predictor di Errore Diagnostico Umano")
 st.markdown("""
 Questa applicazione web stima la probabilità di **errore diagnostico umano** combinando l'analisi radiologica 3D delle MRI con il contesto clinico del medico valutatore (Rater).
 """)
 
+# Carica i modelli in RAM
 with st.spinner("Caricamento modelli in memoria..."):
     diagnostic_models, preprocessors, xgb_models, youden_thresholds = load_ensemble_models()
 
@@ -114,6 +119,16 @@ with col2:
     confidence = st.slider("Confidenza del Medico (1 = Minima, 5 = Massima)", 1, 5, 4)
     difficulty = st.slider("Difficoltà Percepita del Caso (1-5)", 1, 5, 3)
     expertise = st.number_input("Esperienza del Medico (Anni di attività)", min_value=0, max_value=50, value=5)
+    
+    # Controllo per l'Accuratezza Storica del Medico (default = 80%)
+    rater_acc = st.slider(
+        "Accuratezza Storica del Medico (Rater Accuracy)", 
+        min_value=0.50, 
+        max_value=1.00, 
+        value=0.80, 
+        step=0.01,
+        help="Percentuale storica di diagnosi corrette del medico. Valore medio di default nel dataset: 0.80 (80%)."
+    )
 
 st.divider()
 
@@ -148,7 +163,7 @@ if st.button("🔍 Calcola Rischio Errore", type="primary", use_container_width=
                     "rating-confidence": float(confidence),
                     "case-difficulty": float(difficulty),
                     "rater-expertise": float(expertise),
-                    "rater-accuracy": 0.80,  # Fallback per medici non storici
+                    "rater-accuracy": float(rater_acc),  # Variabile dinamica dall'interfaccia
                     "rater-confidence": float(confidence),
                     "rating": int(rating),
                     "ai_probability_class_1": float(p_ai),
@@ -165,20 +180,18 @@ if st.button("🔍 Calcola Rischio Errore", type="primary", use_container_width=
 
             mean_p_error = float(np.mean(d_probs))
             mean_p_ai = float(np.mean(ai_probs))
-            
-            # Soglia di Youden derivata rigorosamente dai dati dell'Ensemble
             mean_youden_threshold = float(np.mean(youden_thresholds))
 
         st.subheader("📊 Risultati dell'Inferenza")
         
         m_col1, m_col2, m_col3 = st.columns(3)
         m_col1.metric(label="Stima Rischio Errore Umano", value=f"{mean_p_error:.1%}")
-        m_col2.metric(label="Soglia Operativa Youden (Reale)", value=f"{mean_youden_threshold:.1%}")
+        m_col2.metric(label="Soglia Operativa Youden (Ensemble)", value=f"{mean_youden_threshold:.1%}")
         m_col3.metric(label="Probabilità Patologia (AI Stadio 1)", value=f"{mean_p_ai:.1%}")
 
         st.divider()
 
-        # Decisione basata rigorosamente sull'Indice J di Youden derivato dai dati
+        # Decisione di Allarme basata sulla Soglia Youden Reale
         if mean_p_error >= mean_youden_threshold:
             st.error(
                 f"🚨 **ALTO RISCHIO ERRORE DIAGNOSTICO**\n\n"
@@ -189,5 +202,5 @@ if st.button("🔍 Calcola Rischio Errore", type="primary", use_container_width=
             st.success(
                 f"✅ **BASSO RISCHIO ERRORE**\n\n"
                 f"La probabilità stimata di errore umano (**{mean_p_error:.1%}**) è inferiore alla soglia ottima di Youden (**{mean_youden_threshold:.1%}**).\n\n"
-                f"👉 *Raccomandazione:* La diagnosi del medico risulta coerente con il contesto ed i rilievi delle immagini MRI."
+                f"👉 *Raccomandazione:* La diagnosi del medico risulta coerente con il profilo clinico ed i rilievi delle immagini MRI."
             )
