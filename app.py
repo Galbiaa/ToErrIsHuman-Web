@@ -24,6 +24,7 @@ from models import DiagnosticNet
 
 device = torch.device("cpu")
 
+# Trasformazioni per l'inferenza della ResNet-18
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
 
@@ -43,6 +44,7 @@ def load_ensemble_models():
     diagnostic_models = []
     preprocessors = []
     xgb_models = []
+    thresholds = []
 
     for fold in range(1, 6):
         diag_path = Path(f"models/diagnostic/diagnostic_fold_{fold}.pt")
@@ -67,11 +69,15 @@ def load_ensemble_models():
         pre = joblib.load(pre_path)
         payload = joblib.load(d_path)
         clf = payload["model"]
+        
+        # Recupera la soglia di Youden memorizzata nel payload
+        thr = float(payload.get("threshold_youden", payload.get("threshold", 0.5)))
 
         preprocessors.append(pre)
         xgb_models.append(clf)
+        thresholds.append(thr)
 
-    return diagnostic_models, preprocessors, xgb_models
+    return diagnostic_models, preprocessors, xgb_models, thresholds
 
 def predict_single_fold(model, axial_img, coronal_img, sagittal_img):
     t_ax = transform(axial_img)
@@ -89,9 +95,9 @@ st.markdown("""
 Questa applicazione web stima la probabilità di **errore diagnostico umano** combinando l'analisi radiologica 3D delle MRI con il contesto clinico del medico valutatore (Rater).
 """)
 
-# Carica i modelli (mostra uno spinner la prima volta)
+# Carica i modelli (mostra uno spinner solo al primo avvio)
 with st.spinner("Caricamento modelli in memoria..."):
-    diagnostic_models, preprocessors, xgb_models = load_ensemble_models()
+    diagnostic_models, preprocessors, xgb_models, thresholds = load_ensemble_models()
 
 st.divider()
 
@@ -105,7 +111,11 @@ with col1:
 
 with col2:
     st.subheader("👨‍⚕️ 2. Dati del Medico Evaluator")
-    rating = st.radio("Diagnosi del Medico (Rating)", options=[0, 1], format_func=lambda x: "0 - Esame Negativo / Sano" if x == 0 else "1 - Esame Positivo / Patologico")
+    rating = st.radio(
+        "Diagnosi del Medico (Rating)", 
+        options=[0, 1], 
+        format_func=lambda x: "0 - Esame Negativo / Sano" if x == 0 else "1 - Esame Positivo / Patologico"
+    )
     confidence = st.slider("Confidenza del Medico (1 = Minima, 5 = Massima)", 1, 5, 4)
     difficulty = st.slider("Difficoltà Percepita del Caso (1-5)", 1, 5, 3)
     expertise = st.number_input("Esperienza del Medico (Anni di attività)", min_value=0, max_value=50, value=5)
@@ -123,18 +133,17 @@ if st.button("🔍 Calcola Rischio Errore", type="primary", use_container_width=
 
             d_probs = []
             ai_probs = []
-            thresholds = []
 
             for fold in range(5):
                 model = diagnostic_models[fold]
                 pre = preprocessors[fold]
                 clf = xgb_models[fold]
 
-                # 1. AI Probability (Stadio 1)
+                # 1. Probabilità AI Diagnostica (Stadio 1)
                 p_ai = predict_single_fold(model, img_ax, img_co, img_sa)
                 ai_probs.append(p_ai)
 
-                # 2. Prepara Feature
+                # 2. Calcolo Feature Derivate per Modello D (Stadio 2)
                 ai_pred_class = 1 if p_ai >= 0.5 else 0
                 disagreement = 1 if rating != ai_pred_class else 0
                 p_wrong = p_ai if rating == 0 else (1.0 - p_ai)
@@ -144,22 +153,18 @@ if st.button("🔍 Calcola Rischio Errore", type="primary", use_container_width=
                     "rating-confidence": float(confidence),
                     "case-difficulty": float(difficulty),
                     "rater-expertise": float(expertise),
-                    "rater-accuracy": 0.80, # valore storico medio
+                    "rater-accuracy": 0.80,  # Fallback per medici non storici
                     "rater-confidence": float(confidence),
                     "rating": int(rating),
-                    "ai_probability_class_1": p_ai,
-                    "ai_predicted_class": ai_pred_class,
-                    "rater_ai_disagreement": disagreement,
-                    "ai_probability_rater_wrong": p_wrong,
-                    "ai_margin": margin
+                    "ai_probability_class_1": float(p_ai),
+                    "ai_predicted_class": int(ai_pred_class),
+                    "rater_ai_disagreement": int(disagreement),
+                    "ai_probability_rater_wrong": float(p_wrong),
+                    "ai_margin": float(margin)
                 }])
 
-                # 3. XGBoost Probability (Stadio 2) e Soglia Youden
-                payload = joblib.load(Path(f"models/D/scenario_D_fold_{fold+1}.joblib"))
-                thr = float(payload.get("threshold_youden", 0.5))
-                thresholds.append(thr)
-
-                X_t = pre.transform(X_df.values)
+                # 3. Probabilità Errore Diagnostico con XGBoost (Stadio 2)
+                X_t = pre.transform(X_df)  # Preserva i nomi delle colonne per il preprocessor
                 p_err = float(clf.predict_proba(X_t)[:, 1][0])
                 d_probs.append(p_err)
 
@@ -171,10 +176,17 @@ if st.button("🔍 Calcola Rischio Errore", type="primary", use_container_width=
         
         m_col1, m_col2, m_col3 = st.columns(3)
         m_col1.metric(label="Stima Rischio Errore Umano", value=f"{mean_p_error:.1%}")
-        m_col2.metric(label="Soglia Operativa del Modello (Youden)", value=f"{mean_threshold:.1%}")
+        m_col2.metric(label="Soglia Operativa (Youden)", value=f"{mean_threshold:.1%}")
         m_col3.metric(label="Probabilità Patologia stimata dall'AI", value=f"{mean_p_ai:.1%}")
 
         if mean_p_error >= mean_threshold:
-            st.error(f"🚨 **ALTO RISCHIO ERRORE DIAGNOSTICO** (Probabilità {mean_p_error:.1%} ≥ Soglia {mean_threshold:.1%})\n\nL'AI indica una probabilità elevata che la diagnosi del rater contenga un errore. Si consiglia un secondo parere radiologico.")
+            st.error(
+                f"🚨 **ALTO RISCHIO ERRORE DIAGNOSTICO** (Probabilità {mean_p_error:.1%} ≥ Soglia {mean_threshold:.1%})\n\n"
+                f"L'AI indica una probabilità elevata che la diagnosi del medico contenga un errore. "
+                f"Si consiglia un secondo parere radiologico."
+            )
         else:
-            st.success(f"✅ **BASSO RISCHIO ERRORE** (Probabilità {mean_p_error:.1%} < Soglia {mean_threshold:.1%})\n\nLa valutazione del medico appare coerente con le caratteristiche radiologiche ed il contesto clinico.")
+            st.success(
+                f"✅ **BASSO RISCHIO ERRORE** (Probabilità {mean_p_error:.1%} < Soglia {mean_threshold:.1%})\n\n"
+                f"La valutazione del medico appare coerente con le caratteristiche radiologiche ed il contesto clinico."
+            )
